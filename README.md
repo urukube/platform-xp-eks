@@ -4,6 +4,10 @@ Crossplane XRD package that provides a self-service EKS cluster golden path for 
 
 This package implements **Option A** of the two-repo cluster pattern: networking and compute are provisioned by separate claims. The VPC outputs from a `UNetwork` claim (`platform-xp-networking`) are passed manually as parameters into the `UEks` claim.
 
+## Composition pipeline
+
+![Composition flowchart](assets/composition-flowchart.svg)
+
 ## What gets provisioned
 
 Every `UEks` claim creates the following AWS resources in the target account:
