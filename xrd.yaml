@@ -1,0 +1,156 @@
+---
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xueks.compute.platform.urukube.io
+spec:
+  group: compute.platform.urukube.io
+  names:
+    kind: XUEks
+    plural: xueks
+  claimNames:
+    kind: UEks
+    plural: ueks
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - parameters
+              properties:
+                parameters:
+                  type: object
+                  required:
+                    - region
+                    - awsAccountId
+                    - buId
+                    - env
+                    - friendlyName
+                    - vpcId
+                    - subnetIds
+                    - subnetCidrs
+                    - nodeSecurityGroupId
+                    - controlPlaneSecurityGroupId
+                  properties:
+                    buId:
+                      type: string
+                      description: Business Unit identifier — must match an EnvironmentConfig with label bu-id
+                      pattern: "^BU[0-9]{3}$"
+                    awsAccountId:
+                      type: string
+                      description: AWS account ID where the cluster will be created
+                      pattern: "^[0-9]{12}$"
+                    region:
+                      type: string
+                      description: AWS region (e.g. us-east-1)
+                    env:
+                      type: string
+                      description: Environment name
+                      enum: [dev, staging, prod]
+                    friendlyName:
+                      type: string
+                      description: Short name prefix — cluster name will be <friendlyName>-eks
+                    vpcId:
+                      type: string
+                      description: VPC ID from the UVpc claim status.vpcId
+                    subnetIds:
+                      type: array
+                      items:
+                        type: string
+                      description: EKS node subnet IDs from UVpc claim status.eksNodeSubnetIds
+                    subnetCidrs:
+                      type: array
+                      items:
+                        type: string
+                      description: EKS node subnet CIDRs — used to open HTTPS to the cluster control plane
+                    nodeSecurityGroupId:
+                      type: string
+                      description: Node security group ID from UVpc claim status.nodeSecurityGroupId
+                    controlPlaneSecurityGroupId:
+                      type: string
+                      description: Control plane security group ID from UVpc claim status.controlPlaneSecurityGroupId
+                    kubernetesVersion:
+                      type: string
+                      default: "1.32"
+                      description: Kubernetes minor version (e.g. 1.32)
+                    endpointAccessType:
+                      type: string
+                      default: private
+                      enum: [private, private_with_public_cidrs, public]
+                      description: >-
+                        API server endpoint access mode.
+                        private: VPC/VPN only.
+                        private_with_public_cidrs: private + public restricted to endpointPublicAccessCidrs.
+                        public: open to 0.0.0.0/0 (not recommended for prod).
+                    endpointPublicAccessCidrs:
+                      type: array
+                      items:
+                        type: string
+                      description: CIDRs allowed to reach the public endpoint. Required when endpointAccessType is private_with_public_cidrs.
+                    nodeInstanceType:
+                      type: string
+                      default: t3.medium
+                      description: EC2 instance type for worker nodes.
+                    amiType:
+                      type: string
+                      default: AL2023_x86_64_STANDARD
+                      enum: [AL2023_x86_64_STANDARD, AL2_x86_64]
+                      description: AMI type for worker nodes.
+                    nodeAmiId:
+                      type: string
+                      description: >-
+                        Explicit AMI ID for the launch template. Must match amiType
+                        and region. Find via:
+                        aws ssm get-parameter --name /aws/service/eks/optimized-ami/<k8s-version>/amazon-linux-2023/x86_64/standard/recommended/image_id
+                    minSize:
+                      type: integer
+                      default: 2
+                      description: Minimum number of worker nodes.
+                    maxSize:
+                      type: integer
+                      default: 3
+                      description: Maximum number of worker nodes.
+                    desiredSize:
+                      type: integer
+                      default: 2
+                      description: Desired number of worker nodes.
+                    maxPodsPerNode:
+                      type: integer
+                      default: 30
+                      description: Maximum pods per node (set via nodeadm kubelet config).
+                    enableIstio:
+                      type: boolean
+                      default: false
+                      description: Open port 15017 (Istio webhook) from the control plane to worker nodes.
+                    iamPermissionsBoundaryArn:
+                      type: string
+                      description: Optional IAM permissions boundary ARN for all IAM roles created by this composition.
+                    tags:
+                      type: object
+                      additionalProperties:
+                        type: string
+                      description: Additional tags applied to all resources.
+            status:
+              type: object
+              properties:
+                clusterName:
+                  type: string
+                  description: EKS cluster name.
+                clusterEndpoint:
+                  type: string
+                  description: EKS API server endpoint URL.
+                oidcProviderArn:
+                  type: string
+                  description: OIDC provider ARN — used to create IRSA roles.
+                oidcIssuerUrl:
+                  type: string
+                  description: OIDC issuer URL.
+                clusterCertificateAuthorityData:
+                  type: string
+                  description: Base64-encoded cluster CA data.

@@ -1,0 +1,403 @@
+---
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xueks.compute.platform.urukube.io
+  labels:
+    provider: aws
+spec:
+  compositeTypeRef:
+    apiVersion: compute.platform.urukube.io/v1alpha1
+    kind: XUEks
+  mode: Pipeline
+  pipeline:
+    # -------------------------------------------------------------------------
+    # Step 1 — Resolve EnvironmentConfigs into the pipeline context.
+    # -------------------------------------------------------------------------
+    - step: resolve-environment
+      functionRef:
+        name: function-environment-configs
+      input:
+        apiVersion: environmentconfigs.fn.crossplane.io/v1beta1
+        kind: Input
+        spec:
+          environmentConfigs:
+            - type: Reference
+              ref:
+                name: org-defaults
+            - type: Selector
+              selector:
+                matchLabels:
+                  - key: bu-id
+                    type: FromCompositeFieldPath
+                    valueFromFieldPath: spec.parameters.buId
+
+    # -------------------------------------------------------------------------
+    # Step 2 — Static resources via patch-and-transform (ProviderConfig).
+    # -------------------------------------------------------------------------
+    - step: patch-and-transform
+      functionRef:
+        name: function-patch-and-transform
+      input:
+        apiVersion: pt.fn.crossplane.io/v1beta1
+        kind: Resources
+        resources:
+          - name: provider-config
+            base:
+              apiVersion: aws.upbound.io/v1beta1
+              kind: ProviderConfig
+              spec:
+                credentials:
+                  source: IRSA
+                assumeRoleChain:
+                  - roleARN: placeholder
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: metadata.name
+                toFieldPath: metadata.name
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.awsAccountId
+                toFieldPath: spec.assumeRoleChain[0].roleARN
+                transforms:
+                  - type: string
+                    string:
+                      type: Format
+                      fmt: "arn:aws:iam::%s:role/urukube-crossplane-role"
+            readinessChecks:
+              - type: None
+
+    # -------------------------------------------------------------------------
+    # Step 3 — Generate all EKS resources via go-templating.
+    # Resources created:
+    #   - IAM Role + InstanceProfile for worker nodes
+    #   - 5× RolePolicyAttachments (EKSWorkerNode, CNI, ECR, SSM, CloudWatch)
+    #   - EKS Cluster
+    #   - kube-proxy Addon
+    #   - LaunchTemplate (AL2023 nodeadm user data)
+    #   - AutoScalingGroup referencing the launch template and node subnets
+    #   - SecurityGroupIngressRule per subnet CIDR opening HTTPS to cluster SG
+    # Status fields (clusterName, endpoint, OIDC ARN) written back each reconcile.
+    # -------------------------------------------------------------------------
+    - step: generate-resources
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            {{- $params   := .observed.composite.resource.spec.parameters }}
+            {{- $name     := .observed.composite.resource.metadata.name }}
+            {{- $obs      := .observed.resources }}
+            {{- $clsName  := printf "%s-eks" $params.friendlyName }}
+            {{- $pcRef    := $name }}
+
+            {{- $privateEndpoint := ne $params.endpointAccessType "public" }}
+            {{- $publicEndpoint  := ne $params.endpointAccessType "private" }}
+            {{- $publicCidrs     := list "0.0.0.0/0" }}
+            {{- if eq $params.endpointAccessType "private_with_public_cidrs" }}
+            {{- $publicCidrs = $params.endpointPublicAccessCidrs }}
+            {{- end }}
+
+            {{- $permsBoundary := "" }}
+            {{- if $params.iamPermissionsBoundaryArn }}{{- $permsBoundary = $params.iamPermissionsBoundaryArn }}{{- end }}
+
+            {{- /* ----------------------------------------------------------------
+                 IAM Node Role
+                 ---------------------------------------------------------------- */}}
+            ---
+            apiVersion: iam.aws.upbound.io/v1beta1
+            kind: Role
+            metadata:
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: node-iam-role
+              labels:
+                role-for: eks-nodes
+            spec:
+              forProvider:
+                assumeRolePolicyDocument: |
+                  {
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                      "Effect": "Allow",
+                      "Principal": { "Service": "ec2.amazonaws.com" },
+                      "Action": "sts:AssumeRole"
+                    }]
+                  }
+                {{- if $permsBoundary }}
+                permissionsBoundary: {{ $permsBoundary }}
+                {{- end }}
+                tags:
+                  Name: {{ printf "%s-node-role" $clsName }}
+                  env: {{ $params.env }}
+                  bu_id: {{ $params.buId }}
+              providerConfigRef:
+                name: {{ $pcRef }}
+
+            ---
+            apiVersion: iam.aws.upbound.io/v1beta1
+            kind: InstanceProfile
+            metadata:
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: node-instance-profile
+            spec:
+              forProvider:
+                roleSelector:
+                  matchControllerRef: true
+                  matchLabels:
+                    role-for: eks-nodes
+              providerConfigRef:
+                name: {{ $pcRef }}
+
+            {{- $nodePolicies := dict
+                  "worker-node"  "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+                  "cni"          "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+                  "ecr"          "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+                  "ssm"          "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+                  "cloudwatch"   "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+            }}
+            {{- range $key, $arn := $nodePolicies }}
+            ---
+            apiVersion: iam.aws.upbound.io/v1beta1
+            kind: RolePolicyAttachment
+            metadata:
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: {{ printf "node-rpa-%s" $key }}
+            spec:
+              forProvider:
+                policyArn: {{ $arn }}
+                roleSelector:
+                  matchControllerRef: true
+                  matchLabels:
+                    role-for: eks-nodes
+              providerConfigRef:
+                name: {{ $pcRef }}
+            {{- end }}
+
+            {{- /* ----------------------------------------------------------------
+                 EKS Cluster
+                 ---------------------------------------------------------------- */}}
+            ---
+            apiVersion: eks.aws.upbound.io/v1beta2
+            kind: Cluster
+            metadata:
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: eks-cluster
+                crossplane.io/external-name: {{ $clsName }}
+              labels:
+                resource: eks-cluster
+            spec:
+              forProvider:
+                region: {{ $params.region }}
+                name: {{ $clsName }}
+                version: {{ $params.kubernetesVersion | quote }}
+                roleArn: ""
+                vpcConfig:
+                  - subnetIds: {{ toJson $params.subnetIds }}
+                    securityGroupIds:
+                      - {{ $params.controlPlaneSecurityGroupId }}
+                    endpointPrivateAccess: {{ $privateEndpoint }}
+                    endpointPublicAccess: {{ $publicEndpoint }}
+                    {{- if $publicEndpoint }}
+                    publicAccessCidrs: {{ toJson $publicCidrs }}
+                    {{- end }}
+                enabledClusterLogTypes:
+                  - api
+                  - audit
+                  - authenticator
+                  - controllerManager
+                  - scheduler
+                accessConfig:
+                  - authenticationMode: API_AND_CONFIG_MAP
+                    bootstrapClusterCreatorAdminPermissions: true
+                tags:
+                  env: {{ $params.env }}
+                  bu_id: {{ $params.buId }}
+              providerConfigRef:
+                name: {{ $pcRef }}
+
+            ---
+            apiVersion: eks.aws.upbound.io/v1beta1
+            kind: Addon
+            metadata:
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: addon-kube-proxy
+            spec:
+              forProvider:
+                region: {{ $params.region }}
+                clusterNameSelector:
+                  matchControllerRef: true
+                  matchLabels:
+                    resource: eks-cluster
+                addonName: kube-proxy
+                resolveConflictsOnCreate: OVERWRITE
+                resolveConflictsOnUpdate: OVERWRITE
+                tags:
+                  env: {{ $params.env }}
+                  bu_id: {{ $params.buId }}
+              providerConfigRef:
+                name: {{ $pcRef }}
+
+            {{- /* ----------------------------------------------------------------
+                 LaunchTemplate for self-managed worker nodes
+                 AL2023 nodeadm user data sets maxPods and node labels.
+                 The cluster name is embedded so nodeadm can bootstrap via IMDS.
+                 ---------------------------------------------------------------- */}}
+            {{- $userData := printf "---\napiVersion: node.eks.aws/v1alpha1\nkind: NodeConfig\nspec:\n  cluster:\n    name: %s\n  kubelet:\n    config:\n      maxPods: %d\n    flags:\n      - \"--node-labels=node.kubernetes.io/instance-type=%s,environment=%s\"\n" $clsName (int $params.maxPodsPerNode) $params.nodeInstanceType $params.env }}
+
+            ---
+            apiVersion: ec2.aws.upbound.io/v1beta1
+            kind: LaunchTemplate
+            metadata:
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: node-launch-template
+              labels:
+                resource: launch-template
+            spec:
+              forProvider:
+                region: {{ $params.region }}
+                namePrefix: {{ printf "%s-node-" $clsName }}
+                instanceType: {{ $params.nodeInstanceType }}
+                {{- if $params.nodeAmiId }}
+                imageId: {{ $params.nodeAmiId }}
+                {{- end }}
+                userData: {{ $userData | b64enc | quote }}
+                metadataOptions:
+                  - httpEndpoint: enabled
+                    httpPutResponseHopLimit: 2
+                    httpTokens: required
+                iamInstanceProfile:
+                  - nameSelector:
+                      matchControllerRef: true
+                networkInterfaces:
+                  - associatePublicIpAddress: "false"
+                    securityGroups:
+                      - {{ $params.nodeSecurityGroupId }}
+                blockDeviceMappings:
+                  - deviceName: /dev/xvda
+                    ebs:
+                      - volumeSize: 50
+                        volumeType: gp3
+                        encrypted: "true"
+                        deleteOnTermination: "true"
+                tagSpecifications:
+                  - resourceType: instance
+                    tags:
+                      Name: {{ printf "%s-node" $clsName }}
+                      env: {{ $params.env }}
+                      bu_id: {{ $params.buId }}
+                  - resourceType: volume
+                    tags:
+                      env: {{ $params.env }}
+                      bu_id: {{ $params.buId }}
+              providerConfigRef:
+                name: {{ $pcRef }}
+
+            {{- /* ----------------------------------------------------------------
+                 AutoScalingGroup — self-managed node group
+                 ---------------------------------------------------------------- */}}
+            ---
+            apiVersion: autoscaling.aws.upbound.io/v1beta3
+            kind: AutoscalingGroup
+            metadata:
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: node-asg
+            spec:
+              forProvider:
+                region: {{ $params.region }}
+                namePrefix: {{ printf "%s-sm-wn-" $clsName }}
+                minSize: {{ $params.minSize }}
+                maxSize: {{ $params.maxSize }}
+                desiredCapacity: {{ $params.desiredSize }}
+                vpcZoneIdentifier: {{ toJson $params.subnetIds }}
+                launchTemplate:
+                  - idSelector:
+                      matchControllerRef: true
+                      matchLabels:
+                        resource: launch-template
+                    version: "$Latest"
+                healthCheckType: EC2
+                healthCheckGracePeriod: 300
+                tag:
+                  - key: Name
+                    value: {{ printf "%s-node" $clsName }}
+                    propagateAtLaunch: true
+                  - key: env
+                    value: {{ $params.env }}
+                    propagateAtLaunch: true
+                  - key: bu_id
+                    value: {{ $params.buId }}
+                    propagateAtLaunch: true
+                  - key: {{ printf "kubernetes.io/cluster/%s" $clsName }}
+                    value: owned
+                    propagateAtLaunch: true
+                  - key: k8s.io/cluster-autoscaler/enabled
+                    value: "true"
+                    propagateAtLaunch: true
+                  - key: {{ printf "k8s.io/cluster-autoscaler/%s" $clsName }}
+                    value: owned
+                    propagateAtLaunch: true
+              providerConfigRef:
+                name: {{ $pcRef }}
+
+            {{- /* ----------------------------------------------------------------
+                 SecurityGroupIngressRule — open HTTPS from each node subnet CIDR
+                 to the cluster's primary security group (auto-created by EKS).
+                 The cluster SG ID is available after the cluster is Ready.
+                 ---------------------------------------------------------------- */}}
+            {{- $clusterSgId := "" }}
+            {{- if index $obs "eks-cluster" }}
+            {{- $clusterSgId = (index $obs "eks-cluster").resource.status.atProvider.vpcConfig.clusterSecurityGroupId }}
+            {{- end }}
+
+            {{- if $clusterSgId }}
+            {{- range $i, $cidr := $params.subnetCidrs }}
+            ---
+            apiVersion: ec2.aws.upbound.io/v1beta1
+            kind: SecurityGroupIngressRule
+            metadata:
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: {{ printf "sgr-cluster-subnet-%d" $i }}
+            spec:
+              forProvider:
+                region: {{ $params.region }}
+                securityGroupId: {{ $clusterSgId }}
+                cidrIpv4: {{ $cidr }}
+                fromPort: 443
+                toPort: 443
+                ipProtocol: tcp
+                description: {{ printf "Allow HTTPS from node subnet %s to EKS control plane" $cidr }}
+              providerConfigRef:
+                name: {{ $pcRef }}
+            {{- end }}
+            {{- end }}
+
+            {{- /* ----------------------------------------------------------------
+                 Write status back to the composite resource.
+                 ---------------------------------------------------------------- */}}
+            {{- $clusterName    := "" }}
+            {{- $clusterEndpoint := "" }}
+            {{- $oidcArn        := "" }}
+            {{- $oidcUrl        := "" }}
+            {{- $caData         := "" }}
+            {{- if index $obs "eks-cluster" }}
+            {{- $c := (index $obs "eks-cluster").resource }}
+            {{- $clusterName    = $c.status.atProvider.name }}
+            {{- $clusterEndpoint = $c.status.atProvider.endpoint }}
+            {{- $oidcArn        = $c.status.atProvider.identity.oidc.issuer }}
+            {{- $oidcUrl        = $c.status.atProvider.identity.oidc.issuer }}
+            {{- $caData         = $c.status.atProvider.certificateAuthority.data }}
+            {{- end }}
+
+            ---
+            apiVersion: compute.platform.urukube.io/v1alpha1
+            kind: XUEks
+            metadata:
+              name: {{ $name }}
+            status:
+              clusterName: {{ $clusterName | quote }}
+              clusterEndpoint: {{ $clusterEndpoint | quote }}
+              oidcProviderArn: {{ $oidcArn | quote }}
+              oidcIssuerUrl: {{ $oidcUrl | quote }}
+              clusterCertificateAuthorityData: {{ $caData | quote }}
