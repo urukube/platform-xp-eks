@@ -340,10 +340,10 @@ spec:
                 {{- if index $readyMap "node-asg" }}
                 gotemplating.fn.crossplane.io/ready: "True"
                 {{- end }}
+                crossplane.io/external-name: {{ printf "%s-sm-wn" $clsName }}
             spec:
               forProvider:
                 region: {{ $params.region }}
-                name: {{ printf "%s-sm-wn" $clsName }}
                 minSize: {{ $params.minSize }}
                 maxSize: {{ $params.maxSize }}
                 desiredCapacity: {{ $params.desiredSize }}
