@@ -89,9 +89,20 @@ spec:
           template: |
             {{- $params   := .observed.composite.resource.spec.parameters }}
             {{- $name     := .observed.composite.resource.metadata.name }}
-            {{- $obs      := .observed.resources }}
+            {{- $obs      := default (dict) .observed.resources }}
             {{- $clsName  := printf "%s-eks" $params.friendlyName }}
             {{- $pcRef    := $name }}
+
+            {{- /* Build readiness map — function-go-templating does not auto-propagate
+                 readiness; set gotemplating.fn.crossplane.io/ready explicitly per resource. */}}
+            {{- $readyMap := dict }}
+            {{- range $crn, $res := $obs }}
+            {{- range $res.resource.status.conditions }}
+            {{- if and (eq .type "Ready") (eq .status "True") }}
+            {{- $readyMap = merge $readyMap (dict $crn "True") }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
 
             {{- $privateEndpoint := ne $params.endpointAccessType "public" }}
             {{- $publicEndpoint  := ne $params.endpointAccessType "private" }}
@@ -112,6 +123,9 @@ spec:
             metadata:
               annotations:
                 gotemplating.fn.crossplane.io/composition-resource-name: node-iam-role
+                {{- if index $readyMap "node-iam-role" }}
+                gotemplating.fn.crossplane.io/ready: "True"
+                {{- end }}
               labels:
                 role-for: eks-nodes
             spec:
@@ -141,6 +155,9 @@ spec:
             metadata:
               annotations:
                 gotemplating.fn.crossplane.io/composition-resource-name: node-instance-profile
+                {{- if index $readyMap "node-instance-profile" }}
+                gotemplating.fn.crossplane.io/ready: "True"
+                {{- end }}
             spec:
               forProvider:
                 roleSelector:
@@ -164,6 +181,9 @@ spec:
             metadata:
               annotations:
                 gotemplating.fn.crossplane.io/composition-resource-name: {{ printf "node-rpa-%s" $key }}
+                {{- if index $readyMap (printf "node-rpa-%s" $key) }}
+                gotemplating.fn.crossplane.io/ready: "True"
+                {{- end }}
             spec:
               forProvider:
                 policyArn: {{ $arn }}
@@ -184,6 +204,9 @@ spec:
             metadata:
               annotations:
                 gotemplating.fn.crossplane.io/composition-resource-name: eks-cluster
+                {{- if index $readyMap "eks-cluster" }}
+                gotemplating.fn.crossplane.io/ready: "True"
+                {{- end }}
                 crossplane.io/external-name: {{ $clsName }}
               labels:
                 resource: eks-cluster
@@ -223,6 +246,9 @@ spec:
             metadata:
               annotations:
                 gotemplating.fn.crossplane.io/composition-resource-name: addon-kube-proxy
+                {{- if index $readyMap "addon-kube-proxy" }}
+                gotemplating.fn.crossplane.io/ready: "True"
+                {{- end }}
             spec:
               forProvider:
                 region: {{ $params.region }}
@@ -258,6 +284,9 @@ spec:
             metadata:
               annotations:
                 gotemplating.fn.crossplane.io/composition-resource-name: node-launch-template
+                {{- if index $readyMap "node-launch-template" }}
+                gotemplating.fn.crossplane.io/ready: "True"
+                {{- end }}
               labels:
                 resource: launch-template
             spec:
@@ -309,6 +338,9 @@ spec:
             metadata:
               annotations:
                 gotemplating.fn.crossplane.io/composition-resource-name: node-asg
+                {{- if index $readyMap "node-asg" }}
+                gotemplating.fn.crossplane.io/ready: "True"
+                {{- end }}
             spec:
               forProvider:
                 region: {{ $params.region }}
@@ -365,6 +397,9 @@ spec:
             metadata:
               annotations:
                 gotemplating.fn.crossplane.io/composition-resource-name: {{ printf "sgr-cluster-subnet-%d" $i }}
+                {{- if index $readyMap (printf "sgr-cluster-subnet-%d" $i) }}
+                gotemplating.fn.crossplane.io/ready: "True"
+                {{- end }}
             spec:
               forProvider:
                 region: {{ $params.region }}
