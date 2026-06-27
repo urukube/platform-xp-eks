@@ -130,7 +130,7 @@ spec:
                 role-for: eks-nodes
             spec:
               forProvider:
-                assumeRolePolicyDocument: |
+                assumeRolePolicy: |
                   {
                     "Version": "2012-10-17",
                     "Statement": [{
@@ -213,7 +213,6 @@ spec:
             spec:
               forProvider:
                 region: {{ $params.region }}
-                name: {{ $clsName }}
                 version: {{ $params.kubernetesVersion | quote }}
                 roleArn: ""
                 vpcConfig:
@@ -292,7 +291,7 @@ spec:
             spec:
               forProvider:
                 region: {{ $params.region }}
-                namePrefix: {{ printf "%s-node-" $clsName }}
+                name: {{ printf "%s-node" $clsName }}
                 instanceType: {{ $params.nodeInstanceType }}
                 {{- if $params.nodeAmiId }}
                 imageId: {{ $params.nodeAmiId }}
@@ -344,7 +343,7 @@ spec:
             spec:
               forProvider:
                 region: {{ $params.region }}
-                namePrefix: {{ printf "%s-sm-wn-" $clsName }}
+                name: {{ printf "%s-sm-wn" $clsName }}
                 minSize: {{ $params.minSize }}
                 maxSize: {{ $params.maxSize }}
                 desiredCapacity: {{ $params.desiredSize }}
