@@ -106,8 +106,8 @@ spec:
                       type: string
                       description: >-
                         Explicit AMI ID for the launch template. Must match amiType
-                        and region. Find via:
-                        aws ssm get-parameter --name /aws/service/eks/optimized-ami/<k8s-version>/amazon-linux-2023/x86_64/standard/recommended/image_id
+                        and region. Find via aws ssm get-parameter with path
+                        /aws/service/eks/optimized-ami/<k8s-version>/amazon-linux-2023/x86_64/standard/recommended/image_id
                     minSize:
                       type: integer
                       default: 2

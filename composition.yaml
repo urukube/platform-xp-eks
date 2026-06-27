@@ -244,7 +244,13 @@ spec:
                  AL2023 nodeadm user data sets maxPods and node labels.
                  The cluster name is embedded so nodeadm can bootstrap via IMDS.
                  ---------------------------------------------------------------- */}}
-            {{- $userData := printf "---\napiVersion: node.eks.aws/v1alpha1\nkind: NodeConfig\nspec:\n  cluster:\n    name: %s\n  kubelet:\n    config:\n      maxPods: %d\n    flags:\n      - \"--node-labels=node.kubernetes.io/instance-type=%s,environment=%s\"\n" $clsName (int $params.maxPodsPerNode) $params.nodeInstanceType $params.env }}
+            {{- $nodeLabels := printf "--node-labels=node.kubernetes.io/instance-type=%s,environment=%s"
+                $params.nodeInstanceType $params.env }}
+            {{- $ud1 := "---\napiVersion: node.eks.aws/v1alpha1\nkind: NodeConfig\n" }}
+            {{- $ud2 := printf "spec:\n  cluster:\n    name: %s\n" $clsName }}
+            {{- $ud3 := printf "  kubelet:\n    config:\n      maxPods: %d\n" (int $params.maxPodsPerNode) }}
+            {{- $ud4 := printf "    flags:\n      - \"%s\"\n" $nodeLabels }}
+            {{- $userData := print $ud1 $ud2 $ud3 $ud4 }}
 
             ---
             apiVersion: ec2.aws.upbound.io/v1beta1
