@@ -216,14 +216,14 @@ spec:
                 version: {{ $params.kubernetesVersion | quote }}
                 roleArn: ""
                 vpcConfig:
-                  - subnetIds: {{ toJson $params.subnetIds }}
-                    securityGroupIds:
-                      - {{ $params.controlPlaneSecurityGroupId }}
-                    endpointPrivateAccess: {{ $privateEndpoint }}
-                    endpointPublicAccess: {{ $publicEndpoint }}
-                    {{- if $publicEndpoint }}
-                    publicAccessCidrs: {{ toJson $publicCidrs }}
-                    {{- end }}
+                  subnetIds: {{ toJson $params.subnetIds }}
+                  securityGroupIds:
+                    - {{ $params.controlPlaneSecurityGroupId }}
+                  endpointPrivateAccess: {{ $privateEndpoint }}
+                  endpointPublicAccess: {{ $publicEndpoint }}
+                  {{- if $publicEndpoint }}
+                  publicAccessCidrs: {{ toJson $publicCidrs }}
+                  {{- end }}
                 enabledClusterLogTypes:
                   - api
                   - audit
@@ -231,8 +231,8 @@ spec:
                   - controllerManager
                   - scheduler
                 accessConfig:
-                  - authenticationMode: API_AND_CONFIG_MAP
-                    bootstrapClusterCreatorAdminPermissions: true
+                  authenticationMode: API_AND_CONFIG_MAP
+                  bootstrapClusterCreatorAdminPermissions: true
                 tags:
                   env: {{ $params.env }}
                   bu_id: {{ $params.buId }}
@@ -278,7 +278,7 @@ spec:
             {{- $userData := print $ud1 $ud2 $ud3 $ud4 }}
 
             ---
-            apiVersion: ec2.aws.upbound.io/v1beta1
+            apiVersion: ec2.aws.upbound.io/v1beta2
             kind: LaunchTemplate
             metadata:
               annotations:
@@ -298,12 +298,12 @@ spec:
                 {{- end }}
                 userData: {{ $userData | b64enc | quote }}
                 metadataOptions:
-                  - httpEndpoint: enabled
-                    httpPutResponseHopLimit: 2
-                    httpTokens: required
+                  httpEndpoint: enabled
+                  httpPutResponseHopLimit: 2
+                  httpTokens: required
                 iamInstanceProfile:
-                  - nameSelector:
-                      matchControllerRef: true
+                  nameSelector:
+                    matchControllerRef: true
                 networkInterfaces:
                   - associatePublicIpAddress: "false"
                     securityGroups:
@@ -311,10 +311,10 @@ spec:
                 blockDeviceMappings:
                   - deviceName: /dev/xvda
                     ebs:
-                      - volumeSize: 50
-                        volumeType: gp3
-                        encrypted: "true"
-                        deleteOnTermination: "true"
+                      volumeSize: 50
+                      volumeType: gp3
+                      encrypted: "true"
+                      deleteOnTermination: "true"
                 tagSpecifications:
                   - resourceType: instance
                     tags:
@@ -349,11 +349,11 @@ spec:
                 desiredCapacity: {{ $params.desiredSize }}
                 vpcZoneIdentifier: {{ toJson $params.subnetIds }}
                 launchTemplate:
-                  - idSelector:
-                      matchControllerRef: true
-                      matchLabels:
-                        resource: launch-template
-                    version: "$Latest"
+                  idSelector:
+                    matchControllerRef: true
+                    matchLabels:
+                      resource: launch-template
+                  version: "$Latest"
                 healthCheckType: EC2
                 healthCheckGracePeriod: 300
                 tag:
