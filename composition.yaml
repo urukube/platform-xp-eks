@@ -491,11 +491,11 @@ spec:
             {{- with $c.status.atProvider }}
             {{- $clusterName    = .name | default "" }}
             {{- $clusterEndpoint = .endpoint | default "" }}
-            {{- with .certificateAuthority }}
+            {{- with index .certificateAuthority 0 }}
             {{- $caData = .data | default "" }}
             {{- end }}
-            {{- with .identity }}
-            {{- with .oidc }}
+            {{- with index .identity 0 }}
+            {{- with index .oidc 0 }}
             {{- $oidcArn = .issuer | default "" }}
             {{- $oidcUrl = .issuer | default "" }}
             {{- end }}
