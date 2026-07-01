@@ -128,6 +128,11 @@ spec:
                       type: boolean
                       default: false
                       description: Open port 15017 (Istio webhook) from the control plane to worker nodes.
+                    adminRoleArns:
+                      type: array
+                      items:
+                        type: string
+                      description: IAM role ARNs to grant cluster admin access via EKS access entries (e.g. operator or CI roles).
                     iamPermissionsBoundaryArn:
                       type: string
                       description: Optional IAM permissions boundary ARN for all IAM roles created by this composition.
