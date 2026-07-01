@@ -33,7 +33,7 @@ spec:
                     valueFromFieldPath: spec.parameters.buId
 
     # -------------------------------------------------------------------------
-    # Step 2 — Static resources via patch-and-transform (ProviderConfig).
+    # Step 2 — ProviderConfig (static, via patch-and-transform).
     # -------------------------------------------------------------------------
     - step: patch-and-transform
       functionRef:
@@ -67,18 +67,10 @@ spec:
               - type: None
 
     # -------------------------------------------------------------------------
-    # Step 3 — Generate all EKS resources via go-templating.
-    # Resources created:
-    #   - IAM Role + InstanceProfile for worker nodes
-    #   - 5× RolePolicyAttachments (EKSWorkerNode, CNI, ECR, SSM, CloudWatch)
-    #   - EKS Cluster
-    #   - kube-proxy Addon
-    #   - LaunchTemplate (AL2023 nodeadm user data)
-    #   - AutoScalingGroup referencing the launch template and node subnets
-    #   - SecurityGroupIngressRule per subnet CIDR opening HTTPS to cluster SG
-    # Status fields (clusterName, endpoint, OIDC ARN) written back each reconcile.
+    # Step 3 — IAM resources.
+    # Resources: Node Role, InstanceProfile, 5x node RPAs, Cluster Role, Cluster RPA.
     # -------------------------------------------------------------------------
-    - step: generate-resources
+    - step: iam-resources
       functionRef:
         name: function-go-templating
       input:
@@ -87,14 +79,11 @@ spec:
         source: Inline
         inline:
           template: |
-            {{- $params   := .observed.composite.resource.spec.parameters }}
-            {{- $name     := .observed.composite.resource.metadata.name }}
-            {{- $obs      := default (dict) .observed.resources }}
-            {{- $clsName  := printf "%s-eks" $params.friendlyName }}
-            {{- $pcRef    := $name }}
+            {{- $params  := .observed.composite.resource.spec.parameters }}
+            {{- $obs     := default (dict) .observed.resources }}
+            {{- $clsName := printf "%s-eks" $params.friendlyName }}
+            {{- $pcRef   := .observed.composite.resource.metadata.name }}
 
-            {{- /* Build readiness map — function-go-templating does not auto-propagate
-                 readiness; set gotemplating.fn.crossplane.io/ready explicitly per resource. */}}
             {{- $readyMap := dict }}
             {{- range $crn, $res := $obs }}
             {{- range $res.resource.status.conditions }}
@@ -104,19 +93,11 @@ spec:
             {{- end }}
             {{- end }}
 
-            {{- $privateEndpoint := ne $params.endpointAccessType "public" }}
-            {{- $publicEndpoint  := ne $params.endpointAccessType "private" }}
-            {{- $publicCidrs     := list "0.0.0.0/0" }}
-            {{- if eq $params.endpointAccessType "private_with_public_cidrs" }}
-            {{- $publicCidrs = $params.endpointPublicAccessCidrs }}
+            {{- $permsBoundary := "" }}
+            {{- if $params.iamPermissionsBoundaryArn }}
+            {{- $permsBoundary = $params.iamPermissionsBoundaryArn }}
             {{- end }}
 
-            {{- $permsBoundary := "" }}
-            {{- if $params.iamPermissionsBoundaryArn }}{{- $permsBoundary = $params.iamPermissionsBoundaryArn }}{{- end }}
-
-            {{- /* ----------------------------------------------------------------
-                 IAM Node Role
-                 ---------------------------------------------------------------- */}}
             ---
             apiVersion: iam.aws.upbound.io/v1beta1
             kind: Role
@@ -195,9 +176,6 @@ spec:
                 name: {{ $pcRef }}
             {{- end }}
 
-            {{- /* ----------------------------------------------------------------
-                 IAM Cluster Role
-                 ---------------------------------------------------------------- */}}
             ---
             apiVersion: iam.aws.upbound.io/v1beta1
             kind: Role
@@ -249,6 +227,40 @@ spec:
               providerConfigRef:
                 name: {{ $pcRef }}
 
+    # -------------------------------------------------------------------------
+    # Step 4 — EKS Cluster + kube-proxy addon.
+    # Reads cluster-iam-role ARN from observed state once IAM step completes.
+    # -------------------------------------------------------------------------
+    - step: cluster
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            {{- $params  := .observed.composite.resource.spec.parameters }}
+            {{- $obs     := default (dict) .observed.resources }}
+            {{- $clsName := printf "%s-eks" $params.friendlyName }}
+            {{- $pcRef   := .observed.composite.resource.metadata.name }}
+
+            {{- $readyMap := dict }}
+            {{- range $crn, $res := $obs }}
+            {{- range $res.resource.status.conditions }}
+            {{- if and (eq .type "Ready") (eq .status "True") }}
+            {{- $readyMap = merge $readyMap (dict $crn "True") }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+
+            {{- $privateEndpoint := ne $params.endpointAccessType "public" }}
+            {{- $publicEndpoint  := ne $params.endpointAccessType "private" }}
+            {{- $publicCidrs     := list "0.0.0.0/0" }}
+            {{- if eq $params.endpointAccessType "private_with_public_cidrs" }}
+            {{- $publicCidrs = $params.endpointPublicAccessCidrs }}
+            {{- end }}
+
             {{- $clusterRoleArn := "" }}
             {{- if index $obs "cluster-iam-role" }}
             {{- with (index $obs "cluster-iam-role").resource.status.atProvider }}
@@ -256,9 +268,6 @@ spec:
             {{- end }}
             {{- end }}
 
-            {{- /* ----------------------------------------------------------------
-                 EKS Cluster
-                 ---------------------------------------------------------------- */}}
             ---
             apiVersion: eks.aws.upbound.io/v1beta2
             kind: Cluster
@@ -325,11 +334,33 @@ spec:
               providerConfigRef:
                 name: {{ $pcRef }}
 
-            {{- /* ----------------------------------------------------------------
-                 LaunchTemplate for self-managed worker nodes
-                 AL2023 nodeadm user data sets maxPods and node labels.
-                 The cluster name is embedded so nodeadm can bootstrap via IMDS.
-                 ---------------------------------------------------------------- */}}
+    # -------------------------------------------------------------------------
+    # Step 5 — Compute resources.
+    # Resources: LaunchTemplate, ASG, SG ingress rules (conditional on cluster SG).
+    # -------------------------------------------------------------------------
+    - step: compute
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            {{- $params  := .observed.composite.resource.spec.parameters }}
+            {{- $obs     := default (dict) .observed.resources }}
+            {{- $clsName := printf "%s-eks" $params.friendlyName }}
+            {{- $pcRef   := .observed.composite.resource.metadata.name }}
+
+            {{- $readyMap := dict }}
+            {{- range $crn, $res := $obs }}
+            {{- range $res.resource.status.conditions }}
+            {{- if and (eq .type "Ready") (eq .status "True") }}
+            {{- $readyMap = merge $readyMap (dict $crn "True") }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+
             {{- $nodeLabels := printf "--node-labels=node.kubernetes.io/instance-type=%s,environment=%s"
                 $params.nodeInstanceType $params.env }}
             {{- $ud1 := "---\napiVersion: node.eks.aws/v1alpha1\nkind: NodeConfig\n" }}
@@ -389,9 +420,6 @@ spec:
               providerConfigRef:
                 name: {{ $pcRef }}
 
-            {{- /* ----------------------------------------------------------------
-                 AutoScalingGroup — self-managed node group
-                 ---------------------------------------------------------------- */}}
             ---
             apiVersion: autoscaling.aws.upbound.io/v1beta3
             kind: AutoscalingGroup
@@ -439,11 +467,6 @@ spec:
               providerConfigRef:
                 name: {{ $pcRef }}
 
-            {{- /* ----------------------------------------------------------------
-                 SecurityGroupIngressRule — open HTTPS from each node subnet CIDR
-                 to the cluster's primary security group (auto-created by EKS).
-                 The cluster SG ID is available after the cluster is Ready.
-                 ---------------------------------------------------------------- */}}
             {{- $clusterSgId := "" }}
             {{- if index $obs "eks-cluster" }}
             {{- with (index $obs "eks-cluster").resource.status.atProvider }}
@@ -478,18 +501,31 @@ spec:
             {{- end }}
             {{- end }}
 
-            {{- /* ----------------------------------------------------------------
-                 Write status back to the composite resource.
-                 ---------------------------------------------------------------- */}}
-            {{- $clusterName    := "" }}
+    # -------------------------------------------------------------------------
+    # Step 6 — Write status back to the composite resource.
+    # Reads cluster endpoint, OIDC issuer, and CA data from observed state.
+    # -------------------------------------------------------------------------
+    - step: write-status
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            {{- $name := .observed.composite.resource.metadata.name }}
+            {{- $obs  := default (dict) .observed.resources }}
+
+            {{- $clusterName     := "" }}
             {{- $clusterEndpoint := "" }}
-            {{- $oidcArn        := "" }}
-            {{- $oidcUrl        := "" }}
-            {{- $caData         := "" }}
+            {{- $oidcArn         := "" }}
+            {{- $oidcUrl         := "" }}
+            {{- $caData          := "" }}
             {{- if index $obs "eks-cluster" }}
             {{- $c := (index $obs "eks-cluster").resource }}
             {{- with $c.status.atProvider }}
-            {{- $clusterName    = .name | default "" }}
+            {{- $clusterName     = .name | default "" }}
             {{- $clusterEndpoint = .endpoint | default "" }}
             {{- with index .certificateAuthority 0 }}
             {{- $caData = .data | default "" }}
