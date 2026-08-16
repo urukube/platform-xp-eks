@@ -40,6 +40,8 @@ apiVersion: pkg.crossplane.io/v1
 kind: Provider
 metadata:
   name: upbound-provider-kubernetes
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
 spec:
   package: xpkg.upbound.io/upbound/provider-kubernetes:v1.2.6
   runtimeConfigRef:
@@ -50,6 +52,8 @@ apiVersion: pkg.crossplane.io/v1beta1
 kind: DeploymentRuntimeConfig
 metadata:
   name: provider-kubernetes-incluster
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
 spec:
   serviceAccountTemplate:
     metadata:
@@ -63,6 +67,8 @@ kind: Role
 metadata:
   name: provider-kubernetes-argocd-clusters
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
@@ -74,6 +80,8 @@ kind: RoleBinding
 metadata:
   name: provider-kubernetes-argocd-clusters
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
 subjects:
   - kind: ServiceAccount
     name: provider-kubernetes-incluster
@@ -84,10 +92,18 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 
 ---
+# Sync-wave 0 (default, explicit here for clarity) — must land strictly after
+# the Provider above (wave -1) so kubernetes.crossplane.io's CRDs are already
+# registered by the time ArgoCD applies this. Bundling Provider + ProviderConfig
+# in one wave fails validation on a cold cluster: the CRD this depends on isn't
+# registered yet, which aborts the ENTIRE Application sync, not just this
+# resource — that's what took down xrd-platform-xp-eks's first sync attempt.
 apiVersion: kubernetes.crossplane.io/v1alpha1
 kind: ProviderConfig
 metadata:
   name: kubernetes-incluster
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   credentials:
     source: InjectedIdentity
