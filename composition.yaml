@@ -506,19 +506,23 @@ spec:
 
             {{- /*
               nodeadm on this AMI does not auto-discover apiServerEndpoint/
-              certificateAuthority via eks:DescribeCluster — it fails
-              config validation ("Apiserver endpoint is missing in cluster
-              configuration") if spec.cluster only has name. Both are
-              already published on the eks-cluster resource's observed
-              status once it's Active.
+              certificateAuthority/cidr via eks:DescribeCluster — it fails
+              config validation ("... is missing in cluster configuration")
+              if spec.cluster only has name. All three are already
+              published on the eks-cluster resource's observed status once
+              it's Active.
             */}}
             {{- $clusterEndpoint := "" }}
             {{- $caData          := "" }}
+            {{- $serviceCidr     := "" }}
             {{- if index $obs "eks-cluster" }}
             {{- with (index $obs "eks-cluster").resource.status.atProvider }}
             {{- $clusterEndpoint = .endpoint | default "" }}
             {{- with index .certificateAuthority 0 }}
             {{- $caData = .data | default "" }}
+            {{- end }}
+            {{- with .kubernetesNetworkConfig }}
+            {{- $serviceCidr = .serviceIpv4Cidr | default "" }}
             {{- end }}
             {{- end }}
             {{- end }}
@@ -526,8 +530,8 @@ spec:
             {{- $nodeLabels := printf "--node-labels=node.kubernetes.io/instance-type=%s,environment=%s"
                 $params.nodeInstanceType $params.env }}
             {{- $ud1 := "---\napiVersion: node.eks.aws/v1alpha1\nkind: NodeConfig\n" }}
-            {{- $ud2 := printf "spec:\n  cluster:\n    name: %s\n    apiServerEndpoint: %s\n    certificateAuthority: %s\n"
-                $clsName $clusterEndpoint $caData }}
+            {{- $ud2 := printf "spec:\n  cluster:\n    name: %s\n    apiServerEndpoint: %s\n    certificateAuthority: %s\n    cidr: %s\n"
+                $clsName $clusterEndpoint $caData $serviceCidr }}
             {{- $ud3 := printf "  kubelet:\n    config:\n      maxPods: %d\n" (int $params.maxPodsPerNode) }}
             {{- $ud4 := printf "    flags:\n      - \"%s\"\n" $nodeLabels }}
             {{- $userData := print $ud1 $ud2 $ud3 $ud4 }}
