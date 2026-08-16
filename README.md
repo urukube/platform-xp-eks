@@ -48,6 +48,7 @@ Every `UEks` claim creates the following AWS resources in the target account:
 | `spec.parameters.desiredSize` | No | `2` | Desired worker nodes |
 | `spec.parameters.maxPodsPerNode` | No | `30` | Maximum pods per node (nodeadm kubelet config) |
 | `spec.parameters.enableIstio` | No | `false` | Open port 15017 (Istio webhook) from control plane to nodes |
+| `spec.parameters.adminRoleArns` | No | — | IAM role ARNs to grant cluster-admin access via EKS access entries (e.g. operator or CI roles) |
 | `spec.parameters.iamPermissionsBoundaryArn` | No | — | IAM permissions boundary ARN for all roles created by this composition |
 | `spec.parameters.tags` | No | — | Additional tags as key-value pairs |
 
@@ -224,7 +225,6 @@ Once the cluster is `Ready`, the following fields are populated and can be used 
 
 | File | Purpose |
 |---|---|
-| `provider.yaml` | Installs `provider-aws-eks`, `provider-aws-ec2`, `provider-aws-autoscaling`, `provider-aws-iam` at v1.21.0; declares this repo's scoped `Role`/`RoleBinding` on `argocd` Secrets for the shared `provider-kubernetes` install (`platform-xp-crossplane-shared/provider-kubernetes.yaml`), used for ArgoCD registration |
+| `provider.yaml` | Installs `provider-aws-eks`, `provider-aws-autoscaling`, `provider-aws-iam` at v1.21.0 (`provider-aws-ec2` is shared via `platform-xp-crossplane-shared`); declares this repo's scoped `Role`/`RoleBinding` on `argocd` Secrets for the shared `provider-kubernetes` install (`platform-xp-crossplane-shared/provider-kubernetes.yaml`), used for ArgoCD registration |
 | `xrd.yaml` | Defines the `XUEks` / `UEks` API and parameter schema |
 | `composition.yaml` | Maps a claim to all EKS resources and publishes cluster outputs to status |
-| `functions.yaml` | Pins the three Crossplane functions used in the composition pipeline |
