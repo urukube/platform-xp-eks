@@ -67,7 +67,68 @@ spec:
               - type: None
 
     # -------------------------------------------------------------------------
-    # Step 3 — IAM resources.
+    # Step 3 — Create urukube-argocd-role in the target account.
+    # Trust-only role used to give the orchestrator's ArgoCD an identity for
+    # EKS API auth (see the register-argocd step). No permissions policy is
+    # attached — authorization happens entirely through the EKS Access Entry
+    # granted in the cluster step, not IAM. The external-name is fixed so
+    # later steps can construct its ARN by convention without an
+    # observed-state lookup. Runs as its own step, ahead of the other IAM
+    # resources, since nothing else in this composition depends on it.
+    # -------------------------------------------------------------------------
+    - step: argocd-role
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            {{- $params := .observed.composite.resource.spec.parameters }}
+            {{- $obs    := default (dict) .observed.resources }}
+            {{- $pcRef  := .observed.composite.resource.metadata.name }}
+            {{- $argocdIrsaRoleArn := (index .context "apiextensions.crossplane.io/environment").orchestratorArgocdRoleArn }}
+
+            {{- $readyMap := dict }}
+            {{- range $crn, $res := $obs }}
+            {{- range $res.resource.status.conditions }}
+            {{- if and (eq .type "Ready") (eq .status "True") }}
+            {{- $readyMap = merge $readyMap (dict $crn "True") }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+
+            ---
+            apiVersion: iam.aws.upbound.io/v1beta1
+            kind: Role
+            metadata:
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: argocd-role
+                {{- if index $readyMap "argocd-role" }}
+                gotemplating.fn.crossplane.io/ready: "True"
+                {{- end }}
+                crossplane.io/external-name: urukube-argocd-role
+            spec:
+              forProvider:
+                assumeRolePolicy: |
+                  {
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                      "Effect": "Allow",
+                      "Principal": { "AWS": {{ $argocdIrsaRoleArn | quote }} },
+                      "Action": "sts:AssumeRole"
+                    }]
+                  }
+                tags:
+                  Name: urukube-argocd-role
+                  env: {{ $params.env }}
+                  bu_id: {{ $params.buId }}
+              providerConfigRef:
+                name: {{ $pcRef }}
+
+    # -------------------------------------------------------------------------
+    # Step 4 — IAM resources.
     # Resources: Node Role, InstanceProfile, 5x node RPAs, Cluster Role, Cluster RPA.
     # -------------------------------------------------------------------------
     - step: iam-resources
@@ -228,7 +289,7 @@ spec:
                 name: {{ $pcRef }}
 
     # -------------------------------------------------------------------------
-    # Step 4 — EKS Cluster + kube-proxy addon.
+    # Step 5 — EKS Cluster + kube-proxy addon.
     # Reads cluster-iam-role ARN from observed state once IAM step completes.
     # -------------------------------------------------------------------------
     - step: cluster
@@ -334,7 +395,10 @@ spec:
               providerConfigRef:
                 name: {{ $pcRef }}
 
-            {{- range $i, $roleArn := $params.adminRoleArns }}
+            {{- /* urukube-argocd-role is created in Step 3 (argocd-role) — this just grants it cluster access. */ -}}
+            {{- $argocdRoleArn := printf "arn:aws:iam::%s:role/urukube-argocd-role" $params.awsAccountId }}
+            {{- $adminArns := append (default (list) $params.adminRoleArns) $argocdRoleArn }}
+            {{- range $i, $roleArn := $adminArns }}
             {{- $slug := $roleArn | splitList "/" | last }}
             ---
             apiVersion: eks.aws.upbound.io/v1beta1
@@ -381,7 +445,7 @@ spec:
             {{- end }}
 
     # -------------------------------------------------------------------------
-    # Step 5 — Compute resources.
+    # Step 6 — Compute resources.
     # Resources: LaunchTemplate, ASG, SG ingress rules (conditional on cluster SG).
     # -------------------------------------------------------------------------
     - step: compute
@@ -548,7 +612,7 @@ spec:
             {{- end }}
 
     # -------------------------------------------------------------------------
-    # Step 6 — Write status back to the composite resource.
+    # Step 7 — Write status back to the composite resource.
     # Reads cluster endpoint, OIDC issuer, and CA data from observed state.
     # -------------------------------------------------------------------------
     - step: write-status
@@ -597,4 +661,87 @@ spec:
               oidcProviderArn: {{ $oidcArn | quote }}
               oidcIssuerUrl: {{ $oidcUrl | quote }}
               clusterCertificateAuthorityData: {{ $caData | quote }}
+            {{- end }}
+
+    # -------------------------------------------------------------------------
+    # Step 8 — Register the cluster with the orchestrator's ArgoCD.
+    # Creates a cluster-registration Secret in the argocd namespace once the
+    # cluster reports an endpoint + CA. ArgoCD authenticates via
+    # awsAuthConfig, assuming urukube-argocd-role (created in Step 3) in the
+    # target account at connection time (same cross-account assume-role
+    # pattern used everywhere else in this composition) — no credentials are
+    # stored here.
+    # -------------------------------------------------------------------------
+    - step: register-argocd
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            {{- $params  := .observed.composite.resource.spec.parameters }}
+            {{- $obs     := default (dict) .observed.resources }}
+            {{- $clsName := printf "%s-eks" $params.friendlyName }}
+
+            {{- $readyMap := dict }}
+            {{- range $crn, $res := $obs }}
+            {{- range $res.resource.status.conditions }}
+            {{- if and (eq .type "Ready") (eq .status "True") }}
+            {{- $readyMap = merge $readyMap (dict $crn "True") }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+
+            {{- $clusterEndpoint := "" }}
+            {{- $caData          := "" }}
+            {{- if index $obs "eks-cluster" }}
+            {{- with (index $obs "eks-cluster").resource.status.atProvider }}
+            {{- $clusterEndpoint = .endpoint | default "" }}
+            {{- with index .certificateAuthority 0 }}
+            {{- $caData = .data | default "" }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+
+            {{- $argocdRoleArn := printf "arn:aws:iam::%s:role/urukube-argocd-role" $params.awsAccountId }}
+
+            {{- if $clusterEndpoint }}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha2
+            kind: Object
+            metadata:
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: argocd-cluster-secret
+                {{- if index $readyMap "argocd-cluster-secret" }}
+                gotemplating.fn.crossplane.io/ready: "True"
+                {{- end }}
+            spec:
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: Secret
+                  type: Opaque
+                  metadata:
+                    name: {{ printf "%s-argocd-cluster" $clsName }}
+                    namespace: argocd
+                    labels:
+                      argocd.argoproj.io/secret-type: cluster
+                      managed-by: platform-xp-eks
+                  stringData:
+                    name: {{ $clsName }}
+                    server: {{ $clusterEndpoint }}
+                    config: |
+                      {
+                        "awsAuthConfig": {
+                          "clusterName": {{ $clsName | quote }},
+                          "roleARN": {{ $argocdRoleArn | quote }}
+                        },
+                        "tlsClientConfig": {
+                          "caData": {{ $caData | quote }}
+                        }
+                      }
+              providerConfigRef:
+                name: kubernetes-incluster
             {{- end }}

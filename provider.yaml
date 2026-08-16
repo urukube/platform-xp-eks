@@ -26,3 +26,68 @@ spec:
   package: xpkg.upbound.io/upbound/provider-aws-iam:v1.21.0
   runtimeConfigRef:
     name: provider-aws-irsa
+
+---
+# Talks to the orchestrator cluster's own API server (InjectedIdentity) to
+# register each new EKS cluster with the orchestrator's ArgoCD. Declared
+# identically to platform-xp-argo-appset's provider-kubernetes wiring
+# (same Provider/DeploymentRuntimeConfig/ProviderConfig names) so both repos
+# converge on one shared provider-kubernetes deployment rather than each
+# repo running its own copy of the same in-cluster provider. Only the RBAC
+# below differs — this repo grants access to Secrets in argocd, not
+# ApplicationSets.
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: upbound-provider-kubernetes
+spec:
+  package: xpkg.upbound.io/upbound/provider-kubernetes:v1.2.6
+  runtimeConfigRef:
+    name: provider-kubernetes-incluster
+
+---
+apiVersion: pkg.crossplane.io/v1beta1
+kind: DeploymentRuntimeConfig
+metadata:
+  name: provider-kubernetes-incluster
+spec:
+  serviceAccountTemplate:
+    metadata:
+      name: provider-kubernetes-incluster
+
+---
+# Scoped to Secrets in the argocd namespace only — this provider must never
+# be able to touch resources outside of it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: provider-kubernetes-argocd-clusters
+  namespace: argocd
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: provider-kubernetes-argocd-clusters
+  namespace: argocd
+subjects:
+  - kind: ServiceAccount
+    name: provider-kubernetes-incluster
+    namespace: crossplane-system
+roleRef:
+  kind: Role
+  name: provider-kubernetes-argocd-clusters
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: kubernetes.crossplane.io/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: kubernetes-incluster
+spec:
+  credentials:
+    source: InjectedIdentity

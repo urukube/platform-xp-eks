@@ -21,6 +21,7 @@ Every `UEks` claim creates the following AWS resources in the target account:
 | AL2023 LaunchTemplate | Instance type, AMI, maxPods, node labels |
 | Self-managed AutoScalingGroup | Min/max/desired size, cluster-autoscaler tags |
 | SecurityGroupIngressRule per subnet CIDR | No — auto-created once cluster is Ready |
+| ArgoCD cluster-registration Secret (on the orchestrator cluster) | No — always created once cluster is Ready |
 
 ## Parameters
 
@@ -181,6 +182,32 @@ Each target AWS account must have a role named `urukube-crossplane-role` with:
 }
 ```
 
+`urukube-argocd-role` — used solely to give the orchestrator's ArgoCD an identity for EKS API auth (see "ArgoCD registration" below) — does **not** need to be created manually. The composition provisions it in the target account itself, in its own dedicated step (Step 3, `argocd-role`) ahead of every other resource, with a fixed `crossplane.io/external-name: urukube-argocd-role` so its ARN is predictable. It has **no permissions policy at all** — authorization happens entirely through the cluster's EKS Access Entry (Step 5), not IAM. Its trust policy names the orchestrator's existing ArgoCD IRSA role, `<cluster_name>-argocd` (provisioned by `orchestrator-custom-addons`'s `argocd-role.tf`), read from the `orchestratorArgocdRoleArn` field in the `org-defaults` `EnvironmentConfig` (`platform-tenant-registry/org/environmentconfig.yaml`):
+
+```json
+{
+  "Effect": "Allow",
+  "Principal": {
+    "AWS": "arn:aws:iam::<orchestrator-account-id>:role/<cluster_name>-argocd"
+  },
+  "Action": "sts:AssumeRole"
+}
+```
+
+The only thing operators must do per organization (not per account) is keep `orchestratorArgocdRoleArn` in `org-defaults` accurate.
+
+## ArgoCD registration
+
+Every `UEks` claim automatically registers its cluster with the orchestrator's ArgoCD once the cluster is `Ready`. The composition:
+
+1. Creates `urukube-argocd-role` in the target account (Step 3), trusting the orchestrator's ArgoCD IRSA role — fully self-service, no manual per-account IAM setup.
+2. Grants that role a cluster-admin `AccessEntry`/`AccessPolicyAssociation` (Step 5) — reusing the same mechanism as `adminRoleArns`.
+3. Creates a `Secret` named `<friendlyName>-eks-argocd-cluster` in the `argocd` namespace on the orchestrator cluster (Step 8, via `provider-kubernetes`, `InjectedIdentity`), labeled `argocd.argoproj.io/secret-type: cluster`.
+
+The Secret's `config` uses ArgoCD's `awsAuthConfig` — ArgoCD assumes `urukube-argocd-role` cross-account at connection time to generate a short-lived EKS token, the same way `aws eks get-token` does. No credentials are stored in the Secret, the target account, or anywhere else.
+
+The orchestrator's ArgoCD already has its own IRSA role (`<cluster_name>-argocd`, from `orchestrator-custom-addons`) permitted to `sts:AssumeRole` on any account/role — nothing further to provision there.
+
 ## Status outputs
 
 Once the cluster is `Ready`, the following fields are populated and can be used to create IRSA roles or configure `kubeconfig`:
@@ -197,7 +224,7 @@ Once the cluster is `Ready`, the following fields are populated and can be used 
 
 | File | Purpose |
 |---|---|
-| `provider.yaml` | Installs `provider-aws-eks`, `provider-aws-ec2`, `provider-aws-autoscaling`, `provider-aws-iam` at v1.21.0 |
+| `provider.yaml` | Installs `provider-aws-eks`, `provider-aws-ec2`, `provider-aws-autoscaling`, `provider-aws-iam` at v1.21.0, plus `provider-kubernetes` (in-cluster, shared with `platform-xp-argo-appset`) for ArgoCD registration |
 | `xrd.yaml` | Defines the `XUEks` / `UEks` API and parameter schema |
 | `composition.yaml` | Maps a claim to all EKS resources and publishes cluster outputs to status |
 | `functions.yaml` | Pins the three Crossplane functions used in the composition pipeline |
