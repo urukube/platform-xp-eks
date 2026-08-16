@@ -224,7 +224,7 @@ Once the cluster is `Ready`, the following fields are populated and can be used 
 
 | File | Purpose |
 |---|---|
-| `provider.yaml` | Installs `provider-aws-eks`, `provider-aws-ec2`, `provider-aws-autoscaling`, `provider-aws-iam` at v1.21.0, plus `provider-kubernetes` (in-cluster, shared with `platform-xp-argo-appset`) for ArgoCD registration |
+| `provider.yaml` | Installs `provider-aws-eks`, `provider-aws-ec2`, `provider-aws-autoscaling`, `provider-aws-iam` at v1.21.0; declares this repo's scoped `Role`/`RoleBinding` on `argocd` Secrets for the shared `provider-kubernetes` install (`platform-xp-crossplane-shared/provider-kubernetes.yaml`), used for ArgoCD registration |
 | `xrd.yaml` | Defines the `XUEks` / `UEks` API and parameter schema |
 | `composition.yaml` | Maps a claim to all EKS resources and publishes cluster outputs to status |
 | `functions.yaml` | Pins the three Crossplane functions used in the composition pipeline |
