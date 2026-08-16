@@ -29,37 +29,14 @@ spec:
 
 ---
 # Talks to the orchestrator cluster's own API server (InjectedIdentity) to
-# register each new EKS cluster with the orchestrator's ArgoCD. Declared
-# identically to platform-xp-argo-appset's provider-kubernetes wiring
-# (same Provider/DeploymentRuntimeConfig/ProviderConfig names) so both repos
-# converge on one shared provider-kubernetes deployment rather than each
-# repo running its own copy of the same in-cluster provider. Only the RBAC
-# below differs — this repo grants access to Secrets in argocd, not
-# ApplicationSets.
-apiVersion: pkg.crossplane.io/v1
-kind: Provider
-metadata:
-  name: upbound-provider-kubernetes
-  annotations:
-    argocd.argoproj.io/sync-wave: "-1"
-spec:
-  package: xpkg.upbound.io/upbound/provider-kubernetes:v1.2.6
-  runtimeConfigRef:
-    name: provider-kubernetes-incluster
-
----
-apiVersion: pkg.crossplane.io/v1beta1
-kind: DeploymentRuntimeConfig
-metadata:
-  name: provider-kubernetes-incluster
-  annotations:
-    argocd.argoproj.io/sync-wave: "-1"
-spec:
-  serviceAccountTemplate:
-    metadata:
-      name: provider-kubernetes-incluster
-
----
+# register each new EKS cluster with the orchestrator's ArgoCD. The
+# Provider/DeploymentRuntimeConfig/ProviderConfig themselves are declared
+# once in platform-xp-crossplane-shared/provider-kubernetes.yaml (shared
+# with platform-xp-argo-appset) — declaring them here too would make ArgoCD
+# see two Applications independently owning the same objects, producing a
+# permanent SharedResourceWarning. Only this repo's own scoped RBAC lives
+# here, bound to that shared provider's ServiceAccount.
+#
 # Scoped to Secrets in the argocd namespace only — this provider must never
 # be able to touch resources outside of it.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -90,29 +67,3 @@ roleRef:
   kind: Role
   name: provider-kubernetes-argocd-clusters
   apiGroup: rbac.authorization.k8s.io
-
----
-# Sync-wave 0 (default, explicit here for clarity) — must land strictly after
-# the Provider above (wave -1) so kubernetes.crossplane.io's CRDs are already
-# registered by the time ArgoCD applies this.
-#
-# SkipDryRunOnMissingResource=true is required in addition to the sync-wave:
-# ArgoCD dry-run-validates every resource in the sync up front, across all
-# waves, before applying anything — so on a cold cluster where this CRD isn't
-# registered yet, the dry-run fails and ArgoCD aborts the ENTIRE Application
-# sync before wave -1 (the Provider that would register the CRD) is ever
-# applied. This option skips that pre-flight check for this resource, so the
-# live apply proceeds; it'll still fail on the first attempt (CRD genuinely
-# not registered yet) but succeeds on a later automatic retry once the
-# Provider — created in wave -1, independently of this resource's fate —
-# has finished installing.
-apiVersion: kubernetes.crossplane.io/v1alpha1
-kind: ProviderConfig
-metadata:
-  name: kubernetes-incluster
-  annotations:
-    argocd.argoproj.io/sync-wave: "0"
-    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
-spec:
-  credentials:
-    source: InjectedIdentity
