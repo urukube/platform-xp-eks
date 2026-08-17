@@ -124,10 +124,6 @@ spec:
                       type: integer
                       default: 30
                       description: Maximum pods per node (set via nodeadm kubelet config).
-                    enableIstio:
-                      type: boolean
-                      default: false
-                      description: Open port 15017 (Istio webhook) from the control plane to worker nodes.
                     adminRoleArns:
                       type: array
                       items:

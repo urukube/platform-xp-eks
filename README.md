@@ -47,7 +47,6 @@ Every `UEks` claim creates the following AWS resources in the target account:
 | `spec.parameters.maxSize` | No | `3` | Maximum worker nodes |
 | `spec.parameters.desiredSize` | No | `2` | Desired worker nodes |
 | `spec.parameters.maxPodsPerNode` | No | `30` | Maximum pods per node (nodeadm kubelet config) |
-| `spec.parameters.enableIstio` | No | `false` | Open port 15017 (Istio webhook) from control plane to nodes |
 | `spec.parameters.adminRoleArns` | No | — | IAM role ARNs to grant cluster-admin access via EKS access entries (e.g. operator or CI roles) |
 | `spec.parameters.iamPermissionsBoundaryArn` | No | — | IAM permissions boundary ARN for all roles created by this composition |
 | `spec.parameters.tags` | No | — | Additional tags as key-value pairs |
