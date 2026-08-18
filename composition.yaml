@@ -536,6 +536,15 @@ spec:
             {{- $ud4 := printf "    flags:\n      - \"%s\"\n" $nodeLabels }}
             {{- $userData := print $ud1 $ud2 $ud3 $ud4 }}
 
+            {{- /*
+              Don't render LaunchTemplate/AutoscalingGroup until the cluster
+              is Active and has published its endpoint — otherwise userData
+              above bakes in empty apiServerEndpoint/certificateAuthority/cidr
+              and nodeadm fails on boot (nodes never join, ASG must be cycled
+              manually to pick up a corrected launch template version).
+            */}}
+            {{- if $clusterEndpoint }}
+
             ---
             apiVersion: ec2.aws.upbound.io/v1beta2
             kind: LaunchTemplate
@@ -633,6 +642,8 @@ spec:
                     propagateAtLaunch: true
               providerConfigRef:
                 name: {{ $pcRef }}
+
+            {{- end }}
 
             {{- $clusterSgId := "" }}
             {{- if index $obs "eks-cluster" }}
